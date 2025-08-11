@@ -1,0 +1,148 @@
+graph TD
+  %% 样式定义
+  classDef agent fill:#fef9e7,stroke:#333,stroke-width:2px,rx:10,ry:10;
+  classDef human fill:#fdebd0,stroke:#d35400,stroke-width:2px,rx:10,ry:10;
+  classDef memory fill:#eaf2f8,stroke:#333,stroke-width:2px,rx:10,ry:10;
+  %% 新增样式：代理人/QA人 (Distiller/Clarifier)
+  classDef distiller fill:#d5f5e3,stroke:#1e8449,stroke-width:2px,rx:10,ry:10;
+  classDef note fill:#ffffff,stroke:#333,stroke-dasharray:3 3;
+  classDef decision fill:#f9e79f,stroke:#f1c40f,stroke-width:2px;
+
+  %% ==================================================
+  %% 1. 输入预处理与澄清闭环 (新增: 代理人/QA人)
+  %% ==================================================
+  subgraph "1. 输入预处理与澄清闭环 (Input Distillation & Clarification)"
+    direction TB
+    RawInput["用户原始输入 (含噪音/模糊/图像)"]:::human
+    Distiller["代理人 (任务蒸馏器/废话提取)"]:::distiller
+    Clarifier["Q A人 (疑问澄清器)"]:::distiller
+    CleanInput["精炼任务定义 (MVS导向)"]:::memory
+
+    %% 流程逻辑：基于"模糊性防火墙"
+    RawInput --> Distiller
+    Distiller -- "分析、提炼、去噪" --> AmbiguityCheck{输入是否清晰定义MVS?}:::decision
+    AmbiguityCheck -- "否 (高度不明确)" --> Clarifier
+    Clarifier -- "向用户提出疑问" --> RawInput
+    %% QA人获取信息后，通常由代理人再次确认并输出最终结果
+    Clarifier -- "获得反馈" --> Distiller
+    AmbiguityCheck -- "是" --> CleanInput
+  end
+
+  %% ==================================================
+  %% 2. 主要路径框架：需求澄清 → 架构设计
+  %% ==================================================
+  subgraph "2. 主要路径框架 (CPO → CTA)"
+    direction TB
+    PMParallel["CPO多模型并行 (温度0.7: 多路思考)"]:::agent
+    PMSummary["CPO总结 (LLM整合输出PRD)"]:::agent
+    ArchMulti["CTA多模型 (温度0.7: 生成文件树+Stubs+解释)"]:::agent
+    NewPMReview["CPO审查 (单模型, 迭代检查缺失/严谨性)"]:::agent
+    TaskDist["任务分配 Agent (基于文件树/拓扑排序分组)"]:::agent
+    HumanReview["人类最终审查/批准"]:::human
+ 
+    %% 连接输入层
+    CleanInput --> PMParallel
+
+    PMParallel -- "多输出规格片段" --> PMSummary
+    PMSummary -- "PRD (压缩总结作为上下文)" --> ArchMulti
+    ArchMulti -- "ADD (文件树 + Stubs + 详细解释)" --> NewPMReview
+    NewPMReview -- "缺失/不严谨反馈" --> ArchMulti
+    NewPMReview -- "最终输出通过" --> TaskDist
+    TaskDist --> HumanReview
+  end
+
+  %% ==================================================
+  %% 3. Super-Agent控制闭环（整体迭代协调）
+  %% ==================================================
+  subgraph "3. Super-Agent控制闭环 (Overall Orchestration)"
+    direction TB
+    Planner["Super-Agent规划器 (全局统筹)"]:::agent
+    PlanJSON["plan.json 与 迭代状态"]:::memory
+    Driver["驱动器 (ReAct式执行)"]:::agent
+    Watcher["监视器"]:::memory
+    MemoryJSON["memory.json"]:::memory
+ 
+    Planner -- "生成/更新 plan.json" --> PlanJSON
+    PlanJSON --> Driver
+    Driver -- "执行结果 (成功/失败)" --> Watcher
+    Watcher -- "更新 memory.json" --> MemoryJSON
+    MemoryJSON --> Planner
+    Driver -- "失败: 触发反思或Replanning" --> Planner
+  end
+
+  %% 连接主要路径和控制闭环
+  HumanReview -- "批准: 开始执行" --> Planner
+  %% 如果人类拒绝，反馈到CPO重新开始需求分析
+  HumanReview -- "拒绝: 重新进行需求/架构分析" --> PMParallel
+
+  %% ==================================================
+  %% 4. 执行层：分组并行开发/测试（文件树驱动）
+  %% ==================================================
+  subgraph "4. 执行层 (Code Generation & Testing)"
+    direction TB
+    subgraph "动态分组 (基于拓扑排序: 先分支后节点)"
+      direction LR
+      GroupA["组A: Level 0 (零依赖)"]:::agent
+      GroupB["组B: Level 1"]:::agent
+      GroupC["组C: Level N (主干)"]:::agent
+    end
+    subgraph "每组结构 (多开agent code)"
+      direction LR
+      DevAgents["开发 Agents (32k模型: 撰写代码, 考虑Stubs/依赖)"]:::agent
+      TestAgents["测试 Agents (32k模型: 增量集成测试 1, 1+2...)"]:::agent
+      Fixer["修复 Agent (32k模型: bug处理)"]:::agent
+    end
+    DevAgents --> TestAgents
+    TestAgents -- "失败/bug" --> Fixer
+    Fixer -- "修复后重测" --> TestAgents
+  end
+
+  %% 连接控制闭环和执行层
+  Driver --> GroupA
+  Driver --> GroupB
+  Driver --> GroupC
+  GroupA & GroupB & GroupC --> DevAgents
+ 
+  %% ==================================================
+  %% 5. 反思框架（Rigor Verification）
+  %% ==================================================
+  subgraph "5. 反思框架 (Rigor Verification & Reflection)"
+    direction TB
+    %% 使用反思者的特定样式
+    Reflector["完美反思者 (1M模型: IMO级严谨性验证)"]:::distiller
+    ReflectionLog["Reflections/Readme.md"]:::memory
+    BugNote["反思要点: <br/>1. 3次失败触发反思 (3-Strike Rule)<br/>2. 上下文压力处理 (双模型压缩)<br/>3. 文件关系对应 (DAG/拓扑排序)<br/>4. 规划者(1M全局)与执行者(32k局部)协同"]:::note
+   
+    Reflector -- "生成《反思报告》" --> ReflectionLog
+    ReflectionLog -- "指导优化/重构策略" --> DevAgents
+    ReflectionLog -- "反馈全局规划缺陷" --> Planner
+  end
+
+  %% 连接执行层和反思框架
+  Fixer -- "3次失败触发 (3-Strike)" --> Reflector
+  TestAgents -- "复杂集成失败" --> Reflector
+ 
+  %% ==================================================
+  %% 6. 存储记忆框架（双模型压缩，无RAG）
+  %% ==================================================
+  subgraph "6. 存储记忆框架 (Memory & Context Compression)"
+    direction TB
+    Uncompressed["未压缩内容 (PRD/ADD/代码/反思日志/Bug日志)"]:::memory
+    Thinking1M["1M思考模型 (英文调查/递归总结)"]:::agent
+    Compressed["压缩总结 (小标题结构)"]:::memory
+    Code32k["32k代码模型 (执行/编码)"]:::agent
+    MemStore["记忆存储 (DevRec/CodeRepo/Reflects)"]:::memory
+ 
+    Uncompressed --> Thinking1M
+    Thinking1M -- "压缩生成" --> Compressed
+    Compressed --> Code32k
+    Code32k -- "输出回存" --> MemStore
+    MemStore -- "反馈循环" --> Uncompressed
+    MemStore --> MemoryJSON
+  end
+
+  %% 整体闭环连接
+  DevAgents -.-> Code32k
+  TestAgents -. "产出反馈 (代码/文档)" .-> MemStore
+  Reflector -. "反思报告存档" .-> MemStore
+  Fixer -. "修复输出" .-> MemStore
